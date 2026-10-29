@@ -119,7 +119,11 @@ Ask the person once which of these they care about; then stop asking and keep it
 
 CHECK-OFFS: give list items a stable 'id'. When the person clicks one on the TV, cdeck_status()
 returns it under 'acks'. On the next refresh, treat acked items as done in the source system
-if you can (complete the Planner task, archive the thread) and drop them from the deck.
+if you can (complete the Planner task, archive the thread) and drop them from the deck. The TV
+keeps an acked item struck through until a push omits it, so nothing "un-checks" on refresh.
+
+LIMITS (server enforces, 422 on violation): 8 sections, 60 rows total, 6 stats, strings 300 chars,
+text sections 2000 chars, refresh_seconds 60..86400, width 0..1.
 
 KEEPING IT FRESH: after the first push, create a recurring scheduled task (every 20-30 minutes
 during waking hours is plenty) whose prompt is: gather the same streams, build the deck in this
@@ -149,7 +153,10 @@ def cdeck_pair(code: str, name: str = "tv") -> str:
     decks = _load()
     if name in decks:
         return f"A TV named {name!r} is already paired. Pick another name or cdeck_unpair({name!r}) first."
-    data = _req("POST", "/v1/pair/claim", body={"code": code})
+    try:
+        data = _req("POST", "/v1/pair/claim", body={"code": code})
+    except RuntimeError as e:
+        return f"Pairing failed: {e}"
     decks[name] = {"push_token": data["push_token"], "paired_at": data.get("paired_at"), "server": SERVER}
     _save(decks)
     _audit("pair", name=name)
@@ -183,7 +190,10 @@ def cdeck_push(deck: dict | str, name: str | None = None) -> str:
     deck.setdefault("v", 1)
     deck.setdefault("updated", _now())
     n, rec = _pick(name)
-    data = _req("PUT", "/v1/deck", token=rec["push_token"], body=deck)
+    try:
+        data = _req("PUT", "/v1/deck", token=rec["push_token"], body=deck)
+    except RuntimeError as e:
+        return f"Push refused: {e}. Fix the deck and try again (cdeck_schema() has the limits)."
     _audit("push", name=n, sections=data.get("sections"))
     return f"Pushed to {n!r}: {data.get('sections')} sections, updated {data.get('updated')}. The TV picks it up within ~{deck.get('refresh_seconds', 1200)}s or on its next Refresh."
 
