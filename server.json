@@ -1,0 +1,21 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.SuperAngryMonkey/cdeck",
+  "description": "Pair with the CDeck Apple TV dashboard app and push a deck of stats, lists and calendar from your own connectors.",
+  "status": "active",
+  "repository": { "url": "https://github.com/SuperAngryMonkey/cdeck-mcp", "source": "github" },
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "cdeck-mcp",
+      "version": "0.1.0",
+      "transport": { "type": "stdio" },
+      "environmentVariables": [
+        { "name": "CDECK_SERVER", "description": "cdeck-api base URL. Defaults to https://cdeck.bigassmonkey.com (the public instance). Point it at your own if you self-host.", "isRequired": false, "isSecret": false },
+        { "name": "CDECK_CONFIG_DIR", "description": "Where push tokens and the audit log live. Defaults to ~/.config/cdeck.", "isRequired": false, "isSecret": false }
+      ]
+    }
+  ]
+}
