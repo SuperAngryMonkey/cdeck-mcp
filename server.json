@@ -1,9 +1,12 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.SuperAngryMonkey/cdeck",
-  "description": "Pair with the CDeck Apple TV dashboard app and push an end-to-end encrypted deck of stats, lists and calendar from your own connectors.",
+  "description": "Push an end-to-end encrypted dashboard of stats, lists and calendar to the CDeck Apple TV app.",
   "status": "active",
-  "repository": { "url": "https://github.com/SuperAngryMonkey/cdeck-mcp", "source": "github" },
+  "repository": {
+    "url": "https://github.com/SuperAngryMonkey/cdeck-mcp",
+    "source": "github"
+  },
   "version": "0.2.0",
   "packages": [
     {
@@ -11,10 +14,22 @@
       "registryBaseUrl": "https://pypi.org",
       "identifier": "cdeck-mcp",
       "version": "0.2.0",
-      "transport": { "type": "stdio" },
+      "transport": {
+        "type": "stdio"
+      },
       "environmentVariables": [
-        { "name": "CDECK_SERVER", "description": "cdeck-api base URL. Defaults to https://cdeck.happymonkey.dev (the public instance). Point it at your own if you self-host.", "isRequired": false, "isSecret": false },
-        { "name": "CDECK_CONFIG_DIR", "description": "Where push tokens and the audit log live. Defaults to ~/.config/cdeck.", "isRequired": false, "isSecret": false }
+        {
+          "name": "CDECK_SERVER",
+          "description": "cdeck-api base URL. Defaults to https://cdeck.happymonkey.dev (the public instance). Point it at your own if you self-host.",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "CDECK_CONFIG_DIR",
+          "description": "Where push tokens and the audit log live. Defaults to ~/.config/cdeck.",
+          "isRequired": false,
+          "isSecret": false
+        }
       ]
     }
   ]
