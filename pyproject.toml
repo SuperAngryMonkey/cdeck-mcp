@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cdeck-mcp"
-version = "0.1.0"
-description = "Claude-side MCP for the CDeck Apple TV dashboard: pair with the code on your TV, push a deck of stats/lists/calendar, read back what you checked off."
+version = "0.2.0"
+description = "Claude-side MCP for the CDeck Apple TV dashboard: pair with the code on your TV, push an end-to-end encrypted deck of stats/lists/calendar, read back what you checked off."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -20,7 +20,7 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
 ]
-dependencies = ["mcp>=1.2.0,<2", "requests>=2.31.0"]
+dependencies = ["mcp>=1.2.0,<2", "requests>=2.31.0", "cryptography>=42"]
 
 [project.urls]
 Homepage = "https://github.com/SuperAngryMonkey/cdeck-mcp"

@@ -6,8 +6,11 @@ Your TV shows a 6-character pairing code. This MCP claims that code, keeps the
 resulting push token, and lets your Claude push a "deck" (a small JSON document
 of stats, lists, calendar rows and notes) that the TV renders and refreshes.
 
-No accounts, no cloud login. The pairing code is the account. The service
-behind it (cdeck-api) only ever sees the JSON your Claude chooses to push.
+No accounts, no cloud login. The pairing code is the account. Decks are
+END-TO-END ENCRYPTED: on pairing this MCP receives the TV's X25519 public key,
+generates its own keypair, and every push is AES-256-GCM sealed here before it
+leaves the machine. The relay (cdeck-api) stores ciphertext it has no key for.
+Check-off ids travel as HMAC tags, so even those are opaque to the relay.
 
 Tools:
   cdeck_pair(code, name)     claim the code shown on the TV
@@ -17,10 +20,14 @@ Tools:
   cdeck_list()               paired TVs on this machine
   cdeck_unpair(name)         forget a TV (server side + local)
 
-Containment: push tokens live in ~/.config/cdeck/decks.json (0600). The only
-thing a push token can do is replace the deck on one TV. There is no delete
-of anything except the pairing itself.
+Containment: push tokens and the per-TV private key live in
+~/.config/cdeck/decks.json (0600). The only thing a push token can do is
+replace the deck on one TV. Losing decks.json means re-pairing (the TV shows a
+new code from its gear menu); nothing on the relay is recoverable without it.
 """
+import base64
+import hashlib
+import hmac as _hmac
 import json
 import os
 import sys
@@ -28,11 +35,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from mcp.server.fastmcp import FastMCP
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
-SERVER = os.environ.get("CDECK_SERVER", "https://cdeck.bigassmonkey.com").rstrip("/")
+SERVER = os.environ.get("CDECK_SERVER", "https://cdeck.happymonkey.dev").rstrip("/")
 CONFIG_DIR = Path(os.environ.get("CDECK_CONFIG_DIR", Path.home() / ".config" / "cdeck"))
 DECKS_FILE = CONFIG_DIR / "decks.json"
 AUDIT_LOG = CONFIG_DIR / "audit.log"
@@ -99,6 +110,120 @@ def _req(method: str, path: str, token: str | None = None, body=None) -> dict:
     return data
 
 
+# ------------------------------------------------------------------ crypto
+
+def _b64e(b: bytes) -> str:
+    return base64.b64encode(b).decode()
+
+
+def _b64d(s: str) -> bytes:
+    return base64.b64decode(s + "=" * (-len(s) % 4))
+
+
+def _derive(sk_b64: str, tv_pk_b64: str) -> tuple[bytes, bytes]:
+    """shared = X25519(sk_mcp, pk_tv); aes/hmac keys via HKDF-SHA256 (matches the TV + Worker)."""
+    sk = X25519PrivateKey.from_private_bytes(_b64d(sk_b64))
+    pk = X25519PublicKey.from_public_bytes(_b64d(tv_pk_b64))
+    shared = sk.exchange(pk)
+    aes = HKDF(algorithm=hashes.SHA256(), length=32, salt=b"", info=b"cdeck-v1-aes").derive(shared)
+    mac = HKDF(algorithm=hashes.SHA256(), length=32, salt=b"", info=b"cdeck-v1-hmac").derive(shared)
+    return aes, mac
+
+
+def _tag(mac_key: bytes, item_id: str) -> str:
+    return _b64e(_hmac.new(mac_key, item_id.encode(), hashlib.sha256).digest())
+
+
+def _seal(rec: dict, deck: dict) -> dict:
+    aes, mac = _derive(rec["sk"], rec["tv_pk"])
+    nonce = os.urandom(12)
+    ct = AESGCM(aes).encrypt(nonce, json.dumps(deck, separators=(",", ":")).encode(), None)
+    ids = []
+    for sec in deck.get("sections", []):
+        items = list(sec.get("items") or []) + [it for g in (sec.get("groups") or []) for it in (g.get("items") or [])]
+        for it in items:
+            if isinstance(it, dict) and it.get("id"):
+                ids.append(_tag(mac, str(it["id"])))
+    rec["last_ids"] = {t: i for t, i in zip(ids, _plain_ids(deck))}
+    return {"v": 2, "pk": rec["pk"], "nonce": _b64e(nonce), "ct": _b64e(ct), "ids": ids, "updated": deck.get("updated")}
+
+
+def _plain_ids(deck: dict) -> list[str]:
+    out = []
+    for sec in deck.get("sections", []):
+        items = list(sec.get("items") or []) + [it for g in (sec.get("groups") or []) for it in (g.get("items") or [])]
+        for it in items:
+            if isinstance(it, dict) and it.get("id"):
+                out.append(str(it["id"]))
+    return out
+
+
+# Local plaintext validation (mirrors the limits the old server enforced; the
+# server can no longer see the deck, so this is the only check).
+LIMITS = {"sections": 8, "rows": 60, "stats": 6, "str": 300, "text": 2000}
+_TYPES = {"stats", "list", "calendar", "text"}
+
+
+def _validate(d) -> str | None:
+    if not isinstance(d, dict):
+        return "deck must be an object"
+    if d.get("v") != 1:
+        return "deck.v must be 1"
+    secs = d.get("sections")
+    if not isinstance(secs, list):
+        return "deck.sections must be an array"
+    if len(secs) > LIMITS["sections"]:
+        return f"at most {LIMITS['sections']} sections"
+    for k in ("title", "subtitle", "updated"):
+        v = d.get(k)
+        if v is not None and (not isinstance(v, str) or len(v) > LIMITS["str"]):
+            return f"deck.{k} must be a string of at most {LIMITS['str']} chars"
+    rs = d.get("refresh_seconds")
+    if rs is not None and (not isinstance(rs, (int, float)) or not 60 <= rs <= 86400):
+        return "refresh_seconds must be 60..86400"
+    rows = 0
+
+    def chk(it, where):
+        nonlocal rows
+        if not isinstance(it, dict):
+            return f"{where} must be an object"
+        for k in ("id", "text", "n", "label", "sub", "kind", "tag", "meta", "time"):
+            v = it.get(k)
+            if v is not None and (not isinstance(v, str) or len(v) > LIMITS["str"]):
+                return f"{where}.{k} must be a string of at most {LIMITS['str']} chars"
+        rows += 1
+        return None
+
+    for i, s in enumerate(secs):
+        w = f"sections[{i}]"
+        if not isinstance(s, dict) or s.get("type") not in _TYPES:
+            return f"{w}.type must be one of {', '.join(sorted(_TYPES))}"
+        if s.get("type") == "text":
+            if not isinstance(s.get("text"), str) or len(s["text"]) > LIMITS["text"]:
+                return f"{w}.text must be a string of at most {LIMITS['text']} chars"
+            continue
+        if s.get("type") == "stats" and len(s.get("items") or []) > LIMITS["stats"]:
+            return f"{w}: at most {LIMITS['stats']} stats"
+        if s.get("type") == "list" and not isinstance(s.get("items"), list) and not isinstance(s.get("groups"), list):
+            return f"{w} needs items or groups"
+        if s.get("type") in ("stats", "calendar") and not isinstance(s.get("items"), list):
+            return f"{w}.items required"
+        for j, g in enumerate(s.get("groups") or []):
+            if not isinstance(g, dict) or not isinstance(g.get("items"), list):
+                return f"{w}.groups[{j}].items required"
+            for k, it in enumerate(g["items"]):
+                e = chk(it, f"{w}.groups[{j}].items[{k}]")
+                if e:
+                    return e
+        for k, it in enumerate(s.get("items") or []):
+            e = chk(it, f"{w}.items[{k}]")
+            if e:
+                return e
+    if rows > LIMITS["rows"]:
+        return f"at most {LIMITS['rows']} rows across all sections (got {rows})"
+    return None
+
+
 GUIDANCE = """
 HOW TO COMPOSE A GOOD DECK (read this once, then just do it)
 
@@ -157,7 +282,17 @@ def cdeck_pair(code: str, name: str = "tv") -> str:
         data = _req("POST", "/v1/pair/claim", body={"code": code})
     except RuntimeError as e:
         return f"Pairing failed: {e}"
-    decks[name] = {"push_token": data["push_token"], "paired_at": data.get("paired_at"), "server": SERVER}
+    if not data.get("tv_pk"):
+        return "Pairing failed: the TV did not provide an encryption key (app too old? needs CDeck >= 2.1)."
+    sk = X25519PrivateKey.generate()
+    decks[name] = {
+        "push_token": data["push_token"],
+        "paired_at": data.get("paired_at"),
+        "server": SERVER,
+        "tv_pk": data["tv_pk"],
+        "sk": _b64e(sk.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())),
+        "pk": _b64e(sk.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)),
+    }
     _save(decks)
     _audit("pair", name=name)
     return (f"Paired {name!r}. The TV now says 'Waiting for Claude'. "
@@ -189,13 +324,20 @@ def cdeck_push(deck: dict | str, name: str | None = None) -> str:
         return "deck must be a JSON object."
     deck.setdefault("v", 1)
     deck.setdefault("updated", _now())
+    bad = _validate(deck)
+    if bad:
+        return f"Push refused: {bad}. Fix the deck and try again (cdeck_schema() has the limits)."
     n, rec = _pick(name)
+    if "sk" not in rec:
+        return f"TV {n!r} was paired before encryption was added. cdeck_unpair({n!r}) and pair again."
+    env = _seal(rec, deck)
     try:
-        data = _req("PUT", "/v1/deck", token=rec["push_token"], body=deck)
+        data = _req("PUT", "/v1/deck", token=rec["push_token"], body=env)
     except RuntimeError as e:
-        return f"Push refused: {e}. Fix the deck and try again (cdeck_schema() has the limits)."
-    _audit("push", name=n, sections=data.get("sections"))
-    return f"Pushed to {n!r}: {data.get('sections')} sections, updated {data.get('updated')}. The TV picks it up within ~{deck.get('refresh_seconds', 1200)}s or on its next Refresh."
+        return f"Push refused: {e}."
+    decks = _load(); decks[n] = rec; _save(decks)   # persist last_ids so status can name acks
+    _audit("push", name=n, sections=len(deck["sections"]))
+    return f"Pushed to {n!r} (encrypted): {len(deck['sections'])} sections, updated {data.get('updated')}. The TV picks it up within ~{deck.get('refresh_seconds', 1200)}s or on its next Refresh."
 
 
 @mcp.tool()
@@ -205,6 +347,10 @@ def cdeck_status(name: str | None = None) -> str:
     n, rec = _pick(name)
     data = _req("GET", "/v1/status", token=rec["push_token"])
     data["name"] = n
+    # Server acks are HMAC tags; map back to the ids from the last push.
+    last = rec.get("last_ids") or {}
+    data["acks"] = {last.get(t, f"<unknown tag {t[:8]}…>"): when for t, when in (data.get("acks") or {}).items()}
+    data["encrypted"] = True
     return json.dumps(data, indent=2)
 
 
@@ -214,7 +360,7 @@ def cdeck_list() -> str:
     decks = _load()
     if not decks:
         return "No TVs paired. Look at the TV for a code and call cdeck_pair(code)."
-    return "\n".join(f"{k}: paired {v.get('paired_at')} via {v.get('server')}" for k, v in decks.items())
+    return "\n".join(f"{k}: paired {v.get('paired_at')} via {v.get('server')}" + ("" if v.get("sk") else "  [NOT ENCRYPTED — unpair + re-pair]") for k, v in decks.items())
 
 
 @mcp.tool()
