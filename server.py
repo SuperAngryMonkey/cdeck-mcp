@@ -97,7 +97,7 @@ def _pick(name: str | None) -> tuple[str, dict]:
 
 
 def _req(method: str, path: str, token: str | None = None, body=None) -> dict:
-    headers = {"accept": "application/json"}
+    headers = {"accept": "application/json", "user-agent": "cdeck-mcp/0.2.0"}   # Cloudflare BIC rejects python-requests default UA
     if token:
         headers["authorization"] = f"Bearer {token}"
     r = requests.request(method, SERVER + path, headers=headers, json=body, timeout=HTTP_TIMEOUT)
